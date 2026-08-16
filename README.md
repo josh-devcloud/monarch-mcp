@@ -5,7 +5,7 @@ A Model Context Protocol (MCP) server for integrating with the Monarch Money per
 
 ## Overview
 
-- **Secure by design** — browser-based login, token stored in OS keychain (never in config files or env vars)
+- **Secure by design** — reuses a logged-in browser session's cookies, stored in the OS keychain (never in config files or env vars)
 - **Safe by default** — read-only mode prevents accidental changes; write tools require explicit opt-in
 - **Comprehensive** — 44 tools covering accounts, transactions, splits, budgets, cashflow, tags, categories, transaction rules, recurring merchants, and credit history
 - **Easy to install** — Claude Desktop extension (`.mcpb`), `uvx`, or `pip`
@@ -120,21 +120,29 @@ To enable write tools, add `"--enable-write"` to `args`.
 
 ### Authentication
 
-Authentication happens **automatically in your browser** the first time the MCP server starts without a saved session.
+Monarch no longer permits programmatic email/password login (it is gated behind a browser-only Cloudflare + client-version check). Instead, the server authenticates by **reusing a logged-in browser session's cookies**, saved securely in your OS keyring.
 
-1. Start (or restart) Claude Desktop
-2. The server detects that no token exists and opens a login page in your browser
-3. Enter your Monarch Money email and password
-4. Provide your 2FA code if you have MFA enabled
-5. Once authenticated, the token is saved to your system keyring — you're all set
+Run the one-time setup in a terminal:
+
+```bash
+python login_setup.py
+```
+
+It walks you through:
+
+1. Log into Monarch at `https://app.monarch.com` in your browser
+2. Open DevTools → **Network** tab, reload, filter for `graphql`, and click a request to `api.monarch.com`
+3. From that request's **Cookies** sub-tab (or the `Cookie` request header), copy the values of **`session_id`** and **`csrftoken`**
+4. Paste them into the hidden prompts — they are verified against Monarch and saved to your system keyring
 
 Key details:
 
-- **Credentials are entered in your browser only** — never through Claude Desktop
-- **Token stored in the OS keyring** — persists across restarts, lasts weeks/months
-- **Expired sessions re-authenticate automatically** — the browser login re-triggers on the next tool call
-- **MFA fully supported**
-- **Fallback**: run `python login_setup.py` in a terminal for headless environments
+- **Cookies are entered locally** via hidden prompts — never through Claude, never written to disk
+- **Stored in the OS keyring** (service `com.mcp.monarch-mcp`) — persists across restarts
+- **On expiry**, just re-run `python login_setup.py` to refresh the cookies
+- `session_id` is **HttpOnly**, so it only appears in the DevTools **Network** tab — the Application → Cookies panel for `app.monarch.com` will not show it
+
+> **Client version:** Monarch also gates API calls on a current web-client version. The server sends the current value (`MONARCH_CLIENT_VERSION` in `src/monarch_mcp/secure_session.py`); if calls begin failing with *"Please update to the latest version of the app"*, bump that constant to match the live web app (grep the app bundle for `clientVersion`).
 
 For technical details on the auth architecture, see [docs/authentication.md](docs/authentication.md).
 
@@ -239,10 +247,10 @@ paths). They are opt-in and never run in CI:
 MONARCH_LIVE_TESTS=1 uv run pytest tests/integration -m integration
 ```
 
-Prerequisites: a stored keyring token (run `python login_setup.py` once), or `MONARCH_EMAIL` /
-`MONARCH_PASSWORD` in the environment. Without these, the suite skips. The tests create and delete
-data prefixed with `MCP-Test-` and self-clean (a post-suite sweep removes any residue). See
-[`tests/integration/README.md`](tests/integration/README.md) for details and safety notes.
+Prerequisites: stored session cookies in the keyring (run `python login_setup.py` once). Without
+them, the suite skips. The tests create and delete data prefixed with `MCP-Test-` and self-clean (a
+post-suite sweep removes any residue). See [`tests/integration/README.md`](tests/integration/README.md)
+for details and safety notes.
 
 > There is also a separate **agent** test skill (`.claude/skills/test-monarch-mcp/`) that drives an
 > AI agent to verify it *calls* the tools correctly — distinct from the two pytest suites above.

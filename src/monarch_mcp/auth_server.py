@@ -11,12 +11,8 @@ import asyncio
 from dataclasses import dataclass
 import json
 import logging
-import os
-import socket
 import threading
-import time
-import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler
 
 from gql.transport.exceptions import TransportServerError
 from monarchmoney import MonarchMoney, RequireMFAException, LoginFailedException
@@ -176,13 +172,6 @@ document.getElementById('code').addEventListener('keydown',e=>{if(e.key==='Enter
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
-def _find_free_port() -> int:
-    """Find an available TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def _run_sync(coro):
     """Run an async coroutine synchronously in a one-shot event loop."""
     loop = asyncio.new_event_loop()
@@ -200,9 +189,9 @@ async def with_auth_recovery(coro):
     loop) so aiohttp/gql connection pooling works correctly across calls.
 
     On HTTP 401/403 or ``LoginFailedException`` recognized by
-    :func:`is_auth_error`, the stale keyring token is deleted, the
-    browser-based login flow is re-triggered, and a ``RuntimeError`` is
-    raised so the calling tool can inform the user.
+    :func:`is_auth_error`, the stale keyring credentials (session cookies
+    and any legacy token) are cleared and a ``RuntimeError`` is raised so
+    the calling tool can tell the user to refresh their session.
 
     Non-auth exceptions propagate unchanged.
     """
@@ -210,12 +199,13 @@ async def with_auth_recovery(coro):
         return await coro
     except (TransportServerError, LoginFailedException) as exc:
         if is_auth_error(exc):
-            logger.warning("Token appears expired — clearing and triggering re-auth")
+            logger.warning("Session appears expired — clearing stored credentials")
+            secure_session.delete_cookies()
             secure_session.delete_token()
             trigger_auth_flow()
             raise RuntimeError(
-                "Your session has expired. A login page has been opened in "
-                "your browser — please sign in and try again."
+                "Your session has expired. Re-run `python login_setup.py` to "
+                "refresh your Monarch session cookies, then try again."
             ) from exc
         raise
 
@@ -461,85 +451,35 @@ def _validate_token(token: str) -> bool | None:
 
 
 def trigger_auth_flow() -> None:
-    """Check for existing credentials; if absent, open a browser login page.
+    """Ensure a usable Monarch session exists; otherwise guide the user.
 
-    This is non-blocking: a daemon thread runs the temporary HTTP server
-    while the MCP server continues its normal startup.  The auth server
-    shuts itself down once the user completes login or after a timeout.
-
-    Safe to call multiple times — only one auth server will run at a time.
+    Monarch no longer supports programmatic email/password login, so
+    authentication is set up out-of-band by ``login_setup.py`` (browser
+    session cookies saved to the keyring). This function only checks for
+    stored credentials and logs guidance when none are usable — it never
+    opens a browser. Safe to call multiple times.
     """
     with _auth_lock:
-        if _auth_guard["active"]:
-            logger.info("Auth server already running — skipping")
+        # Cookie auth (current method): stored cookies mean we're set up.
+        if secure_session.load_cookies():
+            logger.info("Monarch session cookies found — using cookie authentication")
             return
 
-        # Check keyring token — validate it's still usable
+        # Legacy token auth (kept for backward compatibility).
         token = secure_session.load_token()
         if token:
             result = _validate_token(token)
             if result is True:
-                logger.info("Auth token found and validated — skipping browser auth")
+                logger.info("Auth token found and validated")
                 return
             if result is None:
-                # Server error — keep the token, skip browser auth
                 logger.info("Token validation inconclusive (server error) — keeping token")
                 return
-            # Token is definitively invalid (401/403) — clear it
             logger.warning("Clearing stale token from keyring")
             secure_session.delete_token()
 
-        # Environment-variable credentials present (handled at tool-call time)
-        if os.getenv("MONARCH_EMAIL") and os.getenv("MONARCH_PASSWORD"):
-            logger.info("Environment credentials found — skipping browser auth")
-            return
-
-        _auth_guard["active"] = True
-
-    # Spin up the auth server (outside the lock — no need to hold it)
-    port = _find_free_port()
-    state = _AuthState()
-
-    # Create a handler class that carries our state and expected port
-    handler_class = type(
-        "_BoundAuthHandler",
-        (_AuthHandler,),
-        {"auth_state": state, "expected_port": port},
+    logger.warning(
+        "No usable Monarch session found. Monarch no longer supports password "
+        "login; run `python login_setup.py` to sign in with browser session "
+        "cookies (saved securely to your keyring)."
     )
-
-    server = HTTPServer(("127.0.0.1", port), handler_class)
-    server.timeout = 1  # unblock handle_request() every second to check state
-
-    def _serve():
-        start = time.time()
-        logger.info("Auth server listening on http://127.0.0.1:%d", port)
-        try:
-            while not state.completed:
-                server.handle_request()
-                if time.time() - start > _AUTH_TIMEOUT:
-                    logger.warning(
-                        "Auth server timed out after %d seconds — shutting down",
-                        _AUTH_TIMEOUT,
-                    )
-                    break
-            server.server_close()
-            if state.completed:
-                logger.info("Auth server stopped — authentication complete")
-        finally:
-            state.clear_secrets()
-            with _auth_lock:
-                _auth_guard["active"] = False
-
-    thread = threading.Thread(target=_serve, daemon=True, name="monarch-auth-server")
-    thread.start()
-
-    url = f"http://127.0.0.1:{port}"
-    logger.info("Opening browser for Monarch Money login: %s", url)
-    try:
-        webbrowser.open(url)
-    except Exception:  # pylint: disable=broad-exception-caught
-        logger.warning(
-            "Could not open browser automatically. "
-            "Please visit %s to authenticate.",
-            url,
-        )

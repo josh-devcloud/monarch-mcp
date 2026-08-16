@@ -2,9 +2,10 @@
 Secure session management for Monarch Money MCP Server using keyring.
 """
 
+import json
 import logging
 import os
-from typing import Optional
+from typing import Dict, Optional
 
 import keyring
 from monarchmoney import MonarchMoney, LoginFailedException
@@ -15,6 +16,18 @@ logger = logging.getLogger(__name__)
 # Keyring service identifiers
 KEYRING_SERVICE = "com.mcp.monarch-mcp"
 KEYRING_USERNAME = "monarch-token"
+KEYRING_COOKIES_USERNAME = "monarch-cookies"
+
+# Monarch's password-login endpoint is now gated behind a browser-only flow
+# (Cloudflare + a current client version), so we authenticate by reusing a
+# browser session's cookies instead. Monarch also gates GraphQL on a current
+# web-client version; the library ships a stale value, so we override it with
+# the version the live web app currently sends. Bump this when calls start
+# failing with "Please update to the latest version of the app".
+MONARCH_CLIENT_VERSION = "v1.0.3906"
+
+# Cookies required for cookie-based auth (matches the library's REQUIRED_COOKIES).
+REQUIRED_COOKIE_NAMES = ("session_id", "csrftoken")
 
 
 class SecureMonarchSession:
@@ -60,8 +73,80 @@ class SecureMonarchSession:
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Failed to delete token from keyring: %s", e)
 
+    def save_cookies(self, cookies: Dict[str, str]) -> None:
+        """Save Monarch session cookies (session_id + csrftoken) to the keyring."""
+        missing = [k for k in REQUIRED_COOKIE_NAMES if not cookies.get(k)]
+        if missing:
+            raise ValueError(
+                f"Missing required cookies: {', '.join(missing)}. "
+                "Both session_id and csrftoken are required."
+            )
+        try:
+            keyring.set_password(
+                KEYRING_SERVICE, KEYRING_COOKIES_USERNAME, json.dumps(cookies)
+            )
+            logger.info("Monarch session cookies saved securely to keyring")
+            self._cleanup_old_session_files()
+        except Exception as e:
+            logger.error("Failed to save cookies to keyring: %s", e)
+            raise
+
+    def load_cookies(self) -> Optional[Dict[str, str]]:
+        """Load Monarch session cookies from the keyring."""
+        try:
+            raw = keyring.get_password(KEYRING_SERVICE, KEYRING_COOKIES_USERNAME)
+            if raw:
+                cookies = json.loads(raw)
+                if isinstance(cookies, dict):
+                    return cookies
+            return None
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Failed to load cookies from keyring: %s", e)
+            return None
+
+    def delete_cookies(self) -> None:
+        """Delete Monarch session cookies from the keyring."""
+        try:
+            keyring.delete_password(KEYRING_SERVICE, KEYRING_COOKIES_USERNAME)
+            logger.info("Cookies deleted from keyring")
+        except keyring.errors.PasswordDeleteError:
+            logger.info("No cookies found in keyring to delete")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Failed to delete cookies from keyring: %s", e)
+
+    @staticmethod
+    def _apply_client_version(client: MonarchMoney) -> None:
+        """Override the library's stale ``monarch-client-version`` header.
+
+        Monarch rejects requests carrying an old client version; the library
+        hardcodes a stale one, so we replace it with the current web-app value.
+        """
+        headers = getattr(client, "_headers", None)
+        if not isinstance(headers, dict):
+            return
+        for key in list(headers):
+            if key.lower() == "monarch-client-version":
+                del headers[key]
+        headers["Monarch-Client-Version"] = MONARCH_CLIENT_VERSION
+
     def get_authenticated_client(self) -> Optional[MonarchMoney]:
-        """Get an authenticated MonarchMoney client."""
+        """Get an authenticated MonarchMoney client.
+
+        Prefers cookie-based auth (a reused browser session), falling back to a
+        legacy stored token if present.
+        """
+        cookies = self.load_cookies()
+        if cookies:
+            try:
+                client = MonarchMoney()
+                client.set_cookies(cookies)
+                self._apply_client_version(client)
+                logger.info("MonarchMoney client created from stored cookies")
+                return client
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to build cookie-authenticated client: %s", e)
+                # Fall through to token auth if available.
+
         token = self.load_token()
         if not token:
             return None

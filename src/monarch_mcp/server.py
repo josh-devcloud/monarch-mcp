@@ -148,11 +148,12 @@ async def _get_monarch_client() -> MonarchMoney:
             logger.error("Failed to login to Monarch Money: %s", e)
             raise
 
-    # No credentials anywhere — open browser login and tell the user
+    # No stored session — password login is no longer supported by Monarch.
     trigger_auth_flow()
     raise RuntimeError(
-        "Authentication needed! A login page has been opened in your "
-        "browser — please sign in and try again."
+        "Authentication needed! No Monarch session is stored. Run "
+        "`python login_setup.py` to sign in with browser session cookies, "
+        "then try again."
     )
 
 
@@ -160,49 +161,46 @@ async def _get_monarch_client() -> MonarchMoney:
 
 @mcp.tool()
 def setup_authentication() -> str:
-    """Get instructions for setting up secure authentication with Monarch Money."""
-    return """Monarch Money - Authentication
+    """Get instructions for setting up authentication with Monarch Money."""
+    return """Monarch Money - Authentication (browser session cookies)
 
-Authentication happens automatically in your browser:
+Monarch no longer supports app-based email/password login, so the MCP
+server reuses a logged-in browser session:
 
-1. When the MCP server starts without a saved session, a login page
-   opens in your browser automatically
+1. In a terminal, run:  python login_setup.py
 
-2. Enter your Monarch Money email and password
+2. Follow the prompts: log into Monarch in your browser, then paste your
+   `session_id` and `csrftoken` cookies (from DevTools -> Network -> an
+   api.monarch.com request -> Cookie header). They are verified and saved
+   securely to your system keyring.
 
-3. Provide your 2FA code if you have MFA enabled
-
-4. Once authenticated, the token is saved to your system keyring
-
-Then start using Monarch tools in Claude Desktop:
+3. Then use the Monarch tools in Claude:
    - get_accounts - View all accounts
    - get_transactions - Recent transactions
    - get_budgets - Budget information
 
-Session persists across Claude restarts (weeks/months).
-Expired sessions are re-authenticated automatically.
-Credentials are entered in your browser, never through Claude.
-
-Alternative: run `python login_setup.py` in a terminal for
-headless environments where a browser is not available."""
+Sessions persist across restarts. If a session expires, re-run
+`python login_setup.py` to refresh the cookies. Credentials are entered
+in your browser, never through Claude."""
 
 
 @mcp.tool()
 def check_auth_status() -> str:
     """Check if already authenticated with Monarch Money."""
     try:
-        # Check if we have a token in the keyring
+        # Cookie auth is the current method; a legacy token may also exist.
+        cookies = secure_session.load_cookies()
         token = secure_session.load_token()
-        if token:
+        if cookies:
+            status = "Monarch session cookies found in secure keyring storage\n"
+        elif token:
             status = "Authentication token found in secure keyring storage\n"
         else:
-            status = "No authentication token found in keyring\n"
-
-        if os.getenv("MONARCH_EMAIL"):
-            status += "Environment credentials configured: yes\n"
+            status = "No Monarch session found in keyring\n"
 
         status += (
-            "\nTry get_accounts to test connection or run login_setup.py if needed."
+            "\nTry get_accounts to test the connection, or run "
+            "`python login_setup.py` to set up cookie authentication."
         )
 
         return status
@@ -214,11 +212,13 @@ def check_auth_status() -> str:
 def debug_session_loading() -> str:
     """Debug keyring session loading issues."""
     try:
-        # Check keyring access
+        # Check keyring access (cookies preferred, legacy token as fallback)
+        if secure_session.load_cookies():
+            return "Session cookies found in keyring."
         token = secure_session.load_token()
         if token:
             return "Token found in keyring."
-        return "No token found in keyring. Run login_setup.py to authenticate."
+        return "No session found in keyring. Run login_setup.py to authenticate."
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.error("Keyring access failed: %s", e, exc_info=True)
         return "Keyring access failed. See the server logs for details."
