@@ -87,21 +87,21 @@ async def test_check_auth_no_token(mcp_client):
         mock_kr.get_password.return_value = None
         result = (await mcp_client.call_tool("check_auth_status")).content[0].text
 
-    assert "No authentication token" in result
+    assert "No Monarch session found" in result
 
 
-async def test_check_auth_with_env_email(mcp_client, monkeypatch):
+async def test_check_auth_does_not_echo_env_email(mcp_client, monkeypatch):
+    # Env-credential reporting was removed (password login is deprecated); the
+    # account email address must never be echoed back regardless.
     monkeypatch.setenv("MONARCH_EMAIL", "user@test.com")
     result = (await mcp_client.call_tool("check_auth_status")).content[0].text
 
-    # Report that env credentials are configured without echoing the address.
-    assert "Environment credentials configured" in result
     assert "user@test.com" not in result
 
 
 async def test_check_auth_exception(mcp_client):
     with patch("monarch_mcp.server.secure_session") as mock_ss:
-        mock_ss.load_token.side_effect = RuntimeError("boom")
+        mock_ss.load_cookies.side_effect = RuntimeError("boom")
         result = (await mcp_client.call_tool("check_auth_status")).content[0].text
 
     assert "Error checking auth status" in result
@@ -117,12 +117,12 @@ async def test_debug_session_no_token(mcp_client):
         mock_kr.get_password.return_value = None
         result = (await mcp_client.call_tool("debug_session_loading")).content[0].text
 
-    assert "No token found" in result
+    assert "No session found" in result
 
 
 async def test_debug_session_exception(mcp_client):
     with patch("monarch_mcp.server.secure_session") as mock_ss:
-        mock_ss.load_token.side_effect = RuntimeError("keyring busted")
+        mock_ss.load_cookies.side_effect = RuntimeError("keyring busted")
         result = (await mcp_client.call_tool("debug_session_loading")).content[0].text
 
     assert "Keyring access failed" in result

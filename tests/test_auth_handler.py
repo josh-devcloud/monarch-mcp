@@ -1,8 +1,11 @@
-"""Auth handler unit tests (20 tests).
+"""Auth handler unit tests.
 
 Covers _AuthHandler routing (do_GET, do_POST), login/MFA logic,
-_send_json/_send_html helpers, log_message, _find_free_port,
-and _validate_token.
+_send_json/_send_html helpers, log_message, and _validate_token.
+
+Note: the browser login server is retained but no longer started by
+``trigger_auth_flow`` (Monarch blocks programmatic password login);
+these tests still exercise the handler logic directly.
 """
 # pylint: disable=missing-function-docstring,protected-access
 
@@ -16,7 +19,6 @@ from monarchmoney import RequireMFAException
 from monarch_mcp.auth_server import (
     _AuthHandler,
     _AuthState,
-    _find_free_port,
     _validate_token,
 )
 
@@ -329,17 +331,6 @@ def test_do_post_invalid_json():
 
     resp = handler._send_json.call_args[0][0]
     assert "Invalid request body" in resp["error"]
-
-
-# ===================================================================
-# _find_free_port
-# ===================================================================
-
-
-def test_find_free_port():
-    port = _find_free_port()
-    assert isinstance(port, int)
-    assert port > 0
 
 
 # ===================================================================
